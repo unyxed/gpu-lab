@@ -1,0 +1,16 @@
+[project]
+name = "gpu-lab"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = ["torch==2.14.1", "numpy"]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu132" }
