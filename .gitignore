@@ -88,6 +88,8 @@ __pycache__/
 # ==============================================================================
 *.md
 !README.md
+!results/**/*.md
+!notes/**/*.md
 
 # ==============================================================================
 # Python env & offline LeetGPU (problems are upstream's CC BY-NC-ND content: never push)
