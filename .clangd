@@ -1,0 +1,12 @@
+CompileFlags:
+  Add:
+    - -xcuda
+    - --cuda-path=/opt/cuda
+    - --cuda-gpu-arch=sm_120
+    - -I/opt/cuda/include/cccl
+    - -Wno-unknown-cuda-version
+  Remove:
+    - -forward-unknown-to-host-compiler
+    - -arch=*
+    - -lineinfo
+    - -G
