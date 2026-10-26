@@ -1,5 +1,9 @@
 #pragma once
 
+#include <cuda_runtime.h>
+#include <cstdlib>
+#include <cstdio>
+
 #define CUDA_CHECK(call)                                                                                                         \
     do {                                                                                                                         \
         cudaError_t err = (call);                                                                                                \

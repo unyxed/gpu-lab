@@ -36,4 +36,6 @@ foreach(dir IN LISTS exercise_dirs)
   get_filename_component(name ${dir} NAME)
   add_executable(${name} ${cu_files} ${cpp_files})
   target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/common)
+  # Vendored single-header libs (stb_image.h, stb_image_write.h): #include <stb_image.h>
+  target_include_directories(${name} SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
 endforeach()
