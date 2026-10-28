@@ -20,6 +20,10 @@ string(APPEND CMAKE_CUDA_FLAGS_DEBUG " -G")
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+# stb's function bodies, compiled once and linked into every exercise.
+add_library(stb_impl STATIC third_party/stb/stb_impl.cpp)
+target_include_directories(stb_impl SYSTEM PUBLIC ${CMAKE_SOURCE_DIR}/third_party/stb)
+
 # One executable per stage*/<exercise>/ folder that contains .cu files.
 # leetgpu/ is deliberately not included (built by leetgpu/lgpu.py).
 file(GLOB exercise_dirs CONFIGURE_DEPENDS LIST_DIRECTORIES true
@@ -36,6 +40,6 @@ foreach(dir IN LISTS exercise_dirs)
   get_filename_component(name ${dir} NAME)
   add_executable(${name} ${cu_files} ${cpp_files})
   target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/common)
-  # Vendored single-header libs (stb_image.h, stb_image_write.h): #include <stb_image.h>
-  target_include_directories(${name} SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/third_party/stb)
+  # Brings in the stb include path too: #include <stb_image.h>
+  target_link_libraries(${name} PRIVATE stb_impl)
 endforeach()
