@@ -5,7 +5,6 @@ __global__ void matrix_add(const float* A, const float* B, float* C, int N) {
     int i = blockDim.x * blockIdx.x + threadIdx.x;
     if (i < N * N) {
         C[i] = A[i] + B[i];
-        printf("blockDim.x = %d | blockIdx.x = %d | N = %d\n", blockDim.x, blockIdx.x, N);
     }
 }
 
