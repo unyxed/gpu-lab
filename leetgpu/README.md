@@ -5,9 +5,11 @@ Solve [LeetGPU](https://leetgpu.com) challenges locally, in Zed, with no interne
 ```
 leetgpu/
   lgpu.py       the runner (one file, Python + PyTorch)
+  tui.py        the terminal UI (needs textual); `lgpu` with no arguments opens it
   solutions/    YOUR code, committed: solutions/<difficulty>/<id>_<name>/solution.{cu,triton.py,pytorch.py}
+  history/      YOUR benchmark record, committed: every version you measured, its runs and ratings (see below)
   problems/     gitignored clone of AlphaGPU/leetgpu-challenges (CC BY-NC-ND, never pushed)
-  .cache/       gitignored: compiled .so files, scan results, pass/fail status
+  .cache/       gitignored: compiled .so files, scan results, pass/fail status, measured GPU ceilings, TUI theme
 ```
 
 ## One-time setup (needs internet)
@@ -26,22 +28,49 @@ After that, everything works offline. Run `sync` (and then `scan` again) wheneve
 
 `lgpu` with no arguments opens a terminal UI (`tui.py`, built on [Textual](https://textual.textualize.io)). It is a front end over the same data as the CLI. `run` and `new` execute as subprocesses of `lgpu.py` with their output streamed live, so the UI never freezes during nvcc or GPU work. The CLI stays dependency-free, and only `tui.py` needs `textual`.
 
+**It works like a website.** Unless the terminal is wide, you only ever see one page:
+
+1. **List page**: the challenges, nothing else. `enter` or a click opens one.
+2. **Detail page**: the problem statement and the run output together, no list. Run things from here.
+
+Go back and forward like in a browser: `esc`, `backspace`, `alt+←` or the `‹ back` link in the status line go back; `alt+→` goes forward. Opening a different challenge drops the forward history, as a browser would.
+
+On a wide terminal (120+ columns, 16+ rows) there are no pages: the list, the problem and the output are all on screen at once.
+
 | key | action |
 | --- | ------ |
-| `↑` `↓` | pick a challenge; the problem statement shows on the right |
+| `enter` / click | open the challenge (wide view: move into the problem pane) |
+| `esc` / `backspace` / `alt+←` | back (first closes the filter bar if it is open) |
+| `alt+→` | forward |
+| `↑` `↓` | pick a challenge on the list page, scroll the problem on the detail page |
 | `space` / `b` | scroll the problem down / up |
-| `enter` | run example + functional tests (if there's no solution yet, it tells you to press `n`) |
-| `e` / `p` | example only / full run plus `--perf` |
+| `r` | run example + functional tests. From the list page this opens the detail page first. If there's no solution yet, it tells you to press `n` |
+| `e` / `p` | example only / full run plus `--perf` (the benchmark is recorded as a version and rated) |
+| `v` | versions: swaps the problem pane for every benchmarked version of your solution (time, throughput, rating, speedup vs previous and vs PyTorch). `●` is the file in `solutions/` now, `★` the fastest. `enter` on a row edits its note. From the list page it opens the detail page on the versions. Press `v` again for the problem |
 | `n` | copy the starter into `solutions/` (`new`) |
 | `l` / `t` | cycle language (cuda, triton, pytorch) / toggle `--t4` |
-| `/` | show the filter bar and search by id or name. `enter` or `↓` returns to the list and keeps the filter; `esc` clears it and hides the bar |
+| `/` | show the filter bar and search by id or name (from a detail page it goes back to the list first). `enter` or `↓` returns to the list and keeps the filter; `esc` clears it and hides the bar |
 | `d` / `h` / `o` | cycle difficulty / heavy only / todo only |
 | `c` | change the theme; the choice is saved in `.cache/tui.json` and restored on the next launch |
 | `x` | cancel the running job (only shown while one runs) |
+| `tab` | on a small detail page, switch between problem and output. Elsewhere it moves focus, so you can scroll each pane with the keyboard |
 | `?` | key help |
 | `q` | quit |
 
-The layout stacks vertically when the terminal is narrower than 120 columns. While a job runs, the output pane shows a live timer, and the run keys are greyed out.
+**Status line.** The line under the header always shows whether the selected challenge is solved (`✔ solved`, `✘ failing`, `· not run yet`, `○ not started`), the challenge, difficulty, a mark per language (`cu✔ tr– pt–`, current language underlined; `–` means no solution file) and the heavy flag. It is the first thing kept when the terminal shrinks.
+
+**The detail page adapts to the size.**
+
+| terminal | detail page |
+| -------- | ----------- |
+| 90+ columns | problem and output side by side |
+| 40–89 columns, 26+ rows | problem over output |
+| 40–89 columns, fewer rows | one at a time; `tab` switches. Starting a job jumps to the output |
+| under 40×10 | a "too small" message |
+
+The list table drops columns as it narrows (difficulty and per-language marks first) and shortens long names with `…`. Output text re-wraps when its pane changes width. Under 24 rows the header hides, and the footer keeps the essential keys first.
+
+While a job runs, the output pane shows a live timer, and the run keys are greyed out.
 
 Progress column: `cu✔` passed, `cu✘` failed, `cu·` not run yet. `⚠` marks a heavy perf test, `?` a challenge that hasn't been scanned. `sync` and `scan` stay CLI-only.
 
@@ -56,8 +85,10 @@ lgpu new 1 --lang cuda                 # copies the starter to solutions/easy/1_
 # ... edit in Zed ...
 lgpu run 1 --example                   # just the small example
 lgpu run 1                             # example + all functional tests (stops at first failure)
-lgpu run 1 --perf                      # + benchmark the perf test vs the PyTorch reference
-lgpu run 1 --file solutions/easy/1_vector_add/v2.cu --perf   # benchmark another version
+lgpu run 1 --perf                      # + benchmark vs the PyTorch reference; recorded as a version and rated
+lgpu run 1 --perf --note "float4 loads"   # same, and say what changed
+lgpu history 1                         # all your versions side by side
+lgpu run 1 --file solutions/easy/1_vector_add/v2.cu --perf   # benchmark another file (also recorded)
 ```
 
 Languages: `--lang cuda` (default), `triton`, `pytorch`.
@@ -70,6 +101,29 @@ Languages: `--lang cuda` (default), `triton`, `pytorch`.
 - `cases`, `matrix` and `align` blocks become aligned text blocks. `<sub>`, `<sup>` and HTML tables are handled too, and paragraphs are reflowed.
 - A command the renderer doesn't know prints as its bare name, never as a raw backslash. `lgpu sync` lists any unknown commands in the challenge set after pulling, so you know when to add one to the `TEX_*` tables in `lgpu.py`.
 - If a statement is ever hard to read as text, open `challenge.html` in a browser (`show` prints the path).
+
+## Benchmark history and rating
+
+Every `--perf` run whose tests pass is saved, so you can change your kernel, measure again and compare. The TUI does this with `p`.
+
+```bash
+lgpu run 1 --perf --note "shared-memory tiling"   # measure + record (--no-record to skip)
+lgpu history 1                    # versions: time, throughput, roofline rating, speedup vs previous, vs PyTorch
+lgpu history 1 --md               # the same as a markdown table in the results/TEMPLATE.md columns
+lgpu note 1 v2 "float4 loads"     # set or change what a version did
+lgpu diff 1                       # previous vs latest version (lgpu diff 1 v1 v3, or `current` for the file on disk)
+lgpu calibrate                    # re-measure this GPU's ceilings (done automatically the first time)
+```
+
+**Versions.** A version is a hash of your solution file. Benchmark new code and you get `v2`; benchmark the same code again and it adds another run to the same version, which shows how noisy the measurement is (`history` warns when runs of the same code differ by 3% or more, so don't trust speedups smaller than that). A copy of each version's source is kept in `history/<challenge>/<lang>/` so you can diff or restore an old one. Records are in `history/<challenge>/<lang>.json`, committed with your solutions. `--t4` builds are not recorded.
+
+**Rating.** The rating says how close a run got to what this GPU can actually do for the work the challenge requires:
+
+- *memory-bound* (copies, elementwise, reductions, transposes): the minimum bytes the kernel must move (each tensor once, in-out tensors twice) divided by the time, against the best copy bandwidth measured on your GPU.
+- *compute-bound* (matmul, convolution, attention): the reference's FLOPs as PyTorch counts them, against the best fp32 matmul measured on your GPU.
+- It takes whichever limit is slower (the roofline). Grades: A at 80% or more, B 60%, C 40%, D 20%, E below. Ceilings are measured with `lgpu calibrate`, never taken from spec sheets.
+
+Read it as an estimate. Some kernels can never reach 100%, and the byte model is the algorithmic minimum, so an algorithm that must read data several times scores low through no fault of yours. A result shows `n/a` instead of a grade when it can't be rated honestly: the kernel is faster than 0.05 ms (launch overhead dominates), the work is compute-bound but not fp32 (only an fp32 compute ceiling is modelled), or there is no tensor traffic. Before every timed call the L2 cache is overwritten with a scratch buffer, so a small input can't look faster than DRAM allows. This changed `--perf` timings compared with before.
 
 ## How grading works
 

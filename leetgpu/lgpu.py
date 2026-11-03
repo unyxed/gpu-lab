@@ -8,11 +8,16 @@ Usage (from gpu-lab/, via `uv run`):
     uv run leetgpu/lgpu.py list [--heavy]       list challenges with flags and your progress
     uv run leetgpu/lgpu.py show 1               print a problem statement
     uv run leetgpu/lgpu.py new 1 --lang cuda    copy the starter into leetgpu/solutions/
-    uv run leetgpu/lgpu.py run 1 [--perf]       compile + run example and functional tests (+ benchmark)
+    uv run leetgpu/lgpu.py run 1 [--perf]       compile + run example and functional tests (+ benchmark, recorded + rated)
+    uv run leetgpu/lgpu.py history 1            every recorded version of your solution: time, throughput, rating, speedup
+    uv run leetgpu/lgpu.py note 1 v2 "text"     say what changed in a version
+    uv run leetgpu/lgpu.py diff 1 [v1 v2]       diff two saved versions (or one against `current`)
+    uv run leetgpu/lgpu.py calibrate            measure this GPU's bandwidth / fp32 ceilings (ratings are relative to them)
 """
 
 import argparse
 import ctypes
+import difflib
 import hashlib
 import importlib.util
 import json
@@ -34,6 +39,9 @@ SOLUTIONS = ROOT / "solutions"
 CACHE = ROOT / ".cache"
 SCAN_FILE = CACHE / "scan.json"
 STATUS_FILE = CACHE / "status.json"
+MACHINE_FILE = CACHE / "machine.json"  # measured GPU ceilings (see calibrate)
+# Your benchmark history: committed, unlike .cache/. LGPU_HISTORY overrides it (the tests use a scratch folder).
+HISTORY = Path(os.environ.get("LGPU_HISTORY") or ROOT / "history")
 UPSTREAM_URL = "https://github.com/AlphaGPU/leetgpu-challenges.git"
 LOCAL_UPSTREAM = ROOT.parent.parent / "leetgpu-challenges"
 
@@ -241,7 +249,8 @@ def run_case(c, sig, case, solve):
     return errors
 
 
-def bench(fn, warmup, iters):
+def bench(fn, warmup, iters, flush=None):
+    """Median and best time of fn in ms. flush() runs before each timed call (not timed), see make_flush."""
     import torch
 
     for _ in range(warmup):
@@ -249,6 +258,8 @@ def bench(fn, warmup, iters):
     torch.cuda.synchronize()
     times = []
     for _ in range(iters):
+        if flush:
+            flush()
         start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
         start.record()
         fn()
@@ -268,6 +279,294 @@ def describe_case(case):
         elif not isinstance(v, (list, dict)):
             parts.append(f"{k}={v}")
     return " ".join(parts)
+
+
+# ---------------------------------------------------------------- rating (roofline)
+# A run is rated by how close it got to what this GPU can actually do for the work it must do:
+#   memory-bound  -> minimum bytes moved / time, against the best copy bandwidth measured here
+#   compute-bound -> FLOPs of the reference (torch's FlopCounter) / time, against the best fp32 matmul measured here
+# ideal time = max(bytes / bandwidth, flops / peak); efficiency = ideal time / your time. It is an estimate:
+# some kernels can never reach 100%, the byte model is the algorithmic minimum, and ceilings are measured, not specs.
+
+MIN_RATE_MS = 0.05  # faster than this and launch overhead dominates: the number says nothing about the kernel
+GRADES = [(0.80, "A", "excellent"), (0.60, "B", "good"), (0.40, "C", "fair"), (0.20, "D", "slow"), (0.0, "E", "very slow")]
+
+
+def grade_of(eff):
+    if eff is None:
+        return None
+    return next(letter for floor, letter, _ in GRADES if eff >= floor)
+
+
+def grade_word(letter):
+    return next((word for _, g, word in GRADES if g == letter), "")
+
+
+def calibrate(force=False):
+    """Measure what this GPU really achieves: device-to-device copy bandwidth and fp32 matmul throughput. Cached per GPU."""
+    import torch
+
+    name = torch.cuda.get_device_name(0)
+    data = read_json(MACHINE_FILE, {})
+    if not force and data.get("gpu") == name and data.get("copy_gbps") and data.get("fp32_gflops"):
+        return data
+    print(f"measuring {name} ceilings (one time, a couple of seconds)...")
+    n = 256 * 1024 * 1024
+    src = torch.empty(n, dtype=torch.uint8, device="cuda")
+    dst = torch.empty_like(src)
+    _, ms = bench(lambda: dst.copy_(src), 5, 30)  # best time = what the hardware can do
+    copy_gbps = 2 * n / (ms / 1e3) / 1e9  # read + write
+    del src, dst
+    a = torch.randn(4096, 4096, device="cuda")
+    b = torch.randn(4096, 4096, device="cuda")
+    _, ms = bench(lambda: a @ b, 3, 15)
+    data = {
+        "gpu": name,
+        "copy_gbps": round(copy_gbps, 1),
+        "fp32_gflops": round(2 * 4096**3 / (ms / 1e3) / 1e9),
+        "measured": time.strftime("%Y-%m-%d %H:%M"),
+    }
+    write_json(MACHINE_FILE, data)
+    del a, b
+    torch.cuda.empty_cache()  # give the ~700 MB back: the caller already checked free VRAM for the perf test
+    return data
+
+
+def make_flush():
+    """Write a buffer twice the size of L2 before each timed call, so inputs start in DRAM, not in cache."""
+    import torch
+
+    l2 = getattr(torch.cuda.get_device_properties(0), "L2_cache_size", 32 * 1024 * 1024)
+    scratch = torch.empty(2 * l2, dtype=torch.uint8, device="cuda")
+    return lambda: scratch.zero_()
+
+
+def traffic_bytes(sig, case):
+    """Minimum bytes the kernel must move: every tensor once, in-out tensors twice (read + write)."""
+    import torch
+
+    total = 0
+    for k, (_, direction) in sig.items():
+        v = case.get(k)
+        if isinstance(v, torch.Tensor):
+            total += v.numel() * v.element_size() * (2 if direction == "inout" else 1)
+    return total
+
+
+def count_flops(c, sig, case):
+    """FLOPs of the reference as torch counts them (matmul, conv, attention); 0 for elementwise work."""
+    from torch.utils.flop_counter import FlopCounterMode
+
+    ref = dict(case)
+    for k in out_keys(sig):
+        ref[k] = case[k].clone()
+    try:
+        with FlopCounterMode(display=False) as fc:
+            c.reference_impl(**ref)
+        return fc.get_total_flops()
+    except Exception:
+        return 0
+
+
+def rate(nbytes, flops, ms, case, ceilings):
+    import torch
+
+    t = ms / 1e3
+    t_mem = nbytes / (ceilings["copy_gbps"] * 1e9)
+    t_cmp = flops / (ceilings["fp32_gflops"] * 1e9)
+    bound = "compute" if t_cmp > t_mem else "memory"
+    ideal_ms = max(t_mem, t_cmp) * 1e3
+    floats = {v.dtype for v in case.values() if isinstance(v, torch.Tensor) and v.dtype.is_floating_point}
+    why = None
+    if ms < MIN_RATE_MS:
+        why = "too fast to rate (launch overhead dominates)"
+    elif not nbytes:
+        why = "no tensor traffic to model"
+    elif bound == "compute" and floats != {torch.float32}:
+        why = "compute-bound, but only an fp32 compute ceiling is modelled"
+    return {
+        "bytes": nbytes,
+        "flops": flops,
+        "bound": bound,
+        "ideal_ms": round(ideal_ms, 6),
+        "gbps": round(nbytes / t / 1e9, 2),
+        "gflops": round(flops / t / 1e9, 2),
+        "eff": None if why else round(ideal_ms / ms, 4),
+        "why": why,
+    }
+
+
+# ---------------------------------------------------------------- history (versions of a solution + their runs)
+# history/<challenge>/<lang>.json   one record per version (= content hash of the solution file), each with its runs
+# history/<challenge>/<lang>/vN.*   a copy of the source of that version, so old versions can be diffed
+# A version is created when a --perf run passes with a solution file whose hash is new; re-running the same code just
+# adds another run to it, which shows how noisy the measurement is.
+
+
+def history_path(slug, lang):
+    return HISTORY / slug / f"{lang}.json"
+
+
+def read_history(slug, lang):
+    return read_json(history_path(slug, lang), {"versions": []})
+
+
+def source_suffix(lang):
+    return LANGS[lang][0].removeprefix("solution")  # solution.cu -> .cu, solution.triton.py -> .triton.py
+
+
+def version_source(slug, lang, n):
+    return HISTORY / slug / lang / f"v{n}{source_suffix(lang)}"
+
+
+def git_info(path):
+    try:
+        sha = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=5)
+        dirty = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--", str(path)], capture_output=True, text=True, timeout=5)
+        return sha.stdout.strip(), bool(dirty.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return "", False
+
+
+def history_rows(slug, lang):
+    """One summary row per version, oldest first. Shared by the CLI table and the TUI."""
+    data = read_history(slug, lang)
+    rows, prev_ms = [], None
+    for v in data["versions"]:
+        runs = [r for r in v["runs"] if r.get("cases")]
+        if not runs:
+            continue
+        latest = runs[-1]
+        idx = max(range(len(latest["cases"])), key=lambda i: latest["cases"][i].get("bytes", 0))  # the biggest case
+        meds = [r["cases"][idx]["median_ms"] for r in runs if idx < len(r["cases"])]
+        ms = statistics.median(meds)
+        case = latest["cases"][idx]
+        eff = case["ideal_ms"] / ms if case.get("eff") is not None else None
+        rows.append(
+            {
+                "n": v["n"],
+                "hash": v["hash"],
+                "note": v.get("note", ""),
+                "runs": len(runs),
+                "date": latest["ts"],
+                "ms": ms,
+                "spread": (max(meds) - min(meds)) / ms if len(meds) > 1 else None,
+                "gbps": case["bytes"] / (ms / 1e3) / 1e9,
+                "gflops": case["flops"] / (ms / 1e3) / 1e9,
+                "bound": case["bound"],
+                "eff": eff,
+                "grade": grade_of(eff),
+                "why": case.get("why"),
+                "vs_prev": prev_ms / ms if prev_ms else None,
+                "vs_ref": case["ref_median_ms"] / ms,
+                "desc": case.get("desc", ""),
+                "iters": latest.get("iters"),
+                "ceilings": latest.get("ceilings", {}),
+                "gpu": latest.get("gpu", ""),
+            }
+        )
+        prev_ms = ms
+    if rows:
+        best = min(r["ms"] for r in rows)
+        for r in rows:
+            r["best"] = r["ms"] == best
+    return rows
+
+
+def current_hash(ch, lang):
+    src = solution_dir(ch) / LANGS[lang][0]
+    return file_hash(src) if src.exists() else None
+
+
+def parse_version(ref, data):
+    """'v2' / '2' -> 2; 'latest' -> newest recorded version."""
+    ref = str(ref).lower().lstrip("v")
+    if ref == "latest" and data["versions"]:
+        return data["versions"][-1]["n"]
+    return int(ref) if ref.isdigit() else None
+
+
+def set_note(slug, lang, ref, text):
+    data = read_history(slug, lang)
+    n = parse_version(ref, data)
+    for v in data["versions"]:
+        if v["n"] == n:
+            v["note"] = text.strip()
+            write_json(history_path(slug, lang), data)
+            return True
+    return False
+
+
+def record_run(ch, lang, src, src_bytes, results, ceilings, args):
+    """Save a passing --perf measurement under the version whose hash matches the code that was measured (src_bytes)."""
+    if args.t4:
+        print("\nnot recorded: --t4 builds aren't comparable with the native-arch history")
+        return
+    slug = ch["slug"]
+    data = read_history(slug, lang)
+    h = hashlib.sha1(src_bytes).hexdigest()[:12]  # same scheme as file_hash()
+    ver = next((v for v in data["versions"] if v["hash"] == h), None)
+    new = ver is None
+    if new:
+        n = len(data["versions"]) + 1
+        ver = {"n": n, "hash": h, "first_seen": time.strftime("%Y-%m-%d %H:%M"), "note": args.note or "", "runs": []}
+        data["versions"].append(ver)
+        dst = version_source(slug, lang, n)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(src_bytes)
+    elif args.note:
+        ver["note"] = args.note
+    sha, dirty = git_info(src)
+    import torch
+
+    ver["runs"].append(
+        {
+            "ts": time.strftime("%Y-%m-%d %H:%M"),
+            "gpu": torch.cuda.get_device_name(0),
+            "iters": args.iters,
+            "warmup": args.warmup,
+            "seed": args.seed,
+            "git": sha,
+            "dirty": dirty,
+            "l2_flushed": True,
+            "ceilings": {k: ceilings[k] for k in ("copy_gbps", "fp32_gflops")},
+            "cases": results,
+        }
+    )
+    write_json(history_path(slug, lang), data)
+    row = next(r for r in history_rows(slug, lang) if r["n"] == ver["n"])
+    if new:
+        msg = f"\nrecorded as v{ver['n']} (new version of {lang}, hash {h})"
+        if row["vs_prev"]:
+            msg += f": {describe_speedup(row['vs_prev'])} v{ver['n'] - 1}"
+    else:
+        msg = f"\nre-measured v{ver['n']} (same code, run {row['runs']}): {row['ms']:.3f} ms median of runs"
+        if row["spread"] is not None:
+            msg += f", runs differ by {row['spread'] * 100:.1f}%"
+    print(msg)
+    print(f"  see them all: uv run leetgpu/lgpu.py history {ch['id']}" + ("" if lang == "cuda" else f" --lang {lang}"))
+
+
+def describe_speedup(x):
+    if abs(x - 1) < 0.03:
+        return "about the same as (within noise)"
+    return f"{x:.2f}x {'faster than' if x > 1 else 'slower than'}"
+
+
+def fmt_throughput(r):
+    if r["bound"] == "compute":
+        return f"{r['gflops'] / 1000:.2f} TFLOPS" if r["gflops"] >= 1000 else f"{r['gflops']:.0f} GFLOPS"
+    return f"{r['gbps']:.1f} GB/s"
+
+
+def fmt_roofline(r):
+    return f"{r['eff'] * 100:.0f}% {r['grade']}" if r["eff"] is not None else "n/a"
+
+
+def fmt_vs(x):
+    if x is None:
+        return "-"
+    return "~same" if abs(x - 1) < 0.03 else f"{x:.2f}x"
 
 
 # ---------------------------------------------------------------- heavy flags
@@ -866,6 +1165,10 @@ def cmd_run(args):
     torch.manual_seed(args.seed)
     c = load_challenge(ch)
     sig = c.get_solve_signature()
+    # The history must describe the code that was measured, not whatever is on disk when the run ends: you may keep
+    # editing while a benchmark runs. These bytes are what the version hash and the saved copy come from. (The
+    # compiler reads the file a few milliseconds later; that window is not worth rebuilding the compile path for.)
+    src_bytes = src.read_bytes()
     solve = load_solve(src, args.lang, sig, args.t4)
 
     groups = [("example", as_list(c.generate_example_test()))]
@@ -893,7 +1196,9 @@ def cmd_run(args):
     if not passed:
         sys.exit(1)
     if args.perf:
-        run_perf(ch, c, sig, solve, args)
+        measured = run_perf(ch, c, sig, solve, args)
+        if measured and not args.no_record:
+            record_run(ch, args.lang, src, src_bytes, *measured, args)
 
 
 def run_perf(ch, c, sig, solve, args):
@@ -910,18 +1215,114 @@ def run_perf(ch, c, sig, solve, args):
     if need > free and not args.force:
         print(f"\nperf test needs ~{need / GB:.1f}G VRAM, only {free / GB:.1f}G free right now. Close other GPU apps.")
         return
+    ceilings = calibrate()
+    flush = make_flush()
+    results = []
     for case in as_list(c.generate_performance_test()):
         case = {k: materialize(v, "cuda") for k, v in case.items()}
-        print(f"\nperf: {describe_case(case)}")
+        desc = describe_case(case)
+        print(f"\nperf: {desc}")
         errors = run_case(c, sig, case, solve)
         if errors:
             print("[FAIL] perf case is wrong:\n       " + "\n       ".join(errors))
             sys.exit(1)
-        med, best = bench(lambda: solve(case), args.warmup, args.iters)
-        ref_med, _ = bench(lambda: c.reference_impl(**case), args.warmup, args.iters)
-        print(f"  yours:     {med:9.3f} ms median, {best:9.3f} ms best ({args.iters} runs)")
+        flops = count_flops(c, sig, case)
+        med, best = bench(lambda: solve(case), args.warmup, args.iters, flush)
+        ref_med, _ = bench(lambda: c.reference_impl(**case), args.warmup, args.iters, flush)
+        r = rate(traffic_bytes(sig, case), flops, med, case, ceilings)
+        print(f"  yours:     {med:9.3f} ms median, {best:9.3f} ms best ({args.iters} runs, L2 flushed before each)")
         print(f"  reference: {ref_med:9.3f} ms median (PyTorch, {ref_med / med:.2f}x yours)")
+        if r["bound"] == "compute":
+            print(f"  work:      {flops / 1e9:.1f} GFLOP -> {fmt_throughput(r)} (compute-bound; this GPU does {ceilings['fp32_gflops'] / 1000:.2f} TFLOPS fp32)")
+        else:
+            print(f"  traffic:   {r['bytes'] / 1e6:.1f} MB minimum -> {fmt_throughput(r)} (memory-bound; this GPU copies at {ceilings['copy_gbps']:.0f} GB/s)")
+        if r["eff"] is None:
+            print(f"  rating:    n/a, {r['why']}")
+        else:
+            g = grade_of(r["eff"])
+            print(f"  rating:    {g} ({grade_word(g)}), {r['eff'] * 100:.0f}% of the {r['bound']} roofline")
         print(f"  ({torch.cuda.get_device_name(0)}; leetgpu.com times on a T4, so expect different numbers)")
+        results.append(
+            {"desc": desc[:200], "median_ms": round(med, 5), "best_ms": round(best, 5), "ref_median_ms": round(ref_med, 5), **r}
+        )
+    return results, ceilings
+
+
+def cmd_history(args):
+    ch = find_challenge(args.id)
+    lang = args.lang
+    rows = history_rows(ch["slug"], lang)
+    if not rows:
+        sys.exit(f"nothing recorded for {ch['slug']} ({lang}) yet. Record a version with: uv run leetgpu/lgpu.py run {ch['id']} --perf")
+    cur = current_hash(ch, lang)
+    last = rows[-1]
+    if args.md:  # the columns of results/TEMPLATE.md
+        print(f"Input size: {last['desc']} | Runs averaged: median of {last['iters']} timed iterations per run (L2 flushed)\n")
+        print("| version | time (ms) | throughput | speedup vs prev | what changed |")
+        print("|---------|-----------|------------|-----------------|--------------|")
+        for r in rows:
+            print(f"| v{r['n']} | {r['ms']:.3f} | {fmt_throughput(r)} | {fmt_vs(r['vs_prev'])} | {r['note']} |")
+        return
+    c = last["ceilings"]
+    print(f"{ch['slug']} ({lang})   {last['gpu']}   measured ceilings: {c['copy_gbps']:.0f} GB/s copy, {c['fp32_gflops'] / 1000:.2f} TFLOPS fp32")
+    print(f"input: {last['desc']}\n")
+    print(f"  {'version':<9}{'time (ms)':>10}  {'throughput':>13}  {'roofline':>9}  {'vs prev':>8}  {'vs torch':>8}  {'runs':>4}  what changed")
+    for r in rows:
+        tag = f"v{r['n']}" + ("*" if r["hash"] == cur else "") + ("★" if r["best"] and len(rows) > 1 else "")
+        print(
+            f"  {tag:<9}{r['ms']:>10.3f}  {fmt_throughput(r):>13}  {fmt_roofline(r):>9}  {fmt_vs(r['vs_prev']):>8}  "
+            f"{fmt_vs(r['vs_ref']):>8}  {r['runs']:>4}  {r['note']}"
+        )
+    print("\n  * = the file in solutions/ right now    ★ = fastest    roofline = % of what this GPU can do for this work")
+    print("  vs prev / vs torch: how many times faster you are (1.50x = 50% faster, below 1 = slower)")
+    if cur and all(r["hash"] != cur for r in rows):
+        print(f"  your current solution file has no recorded run yet (it differs from every version): run {ch['id']} --perf to record it")
+    noisy = max((r["spread"] or 0) for r in rows)
+    if noisy >= 0.03:
+        print(f"  the same code measured up to {noisy * 100:.0f}% apart between runs: treat speedups smaller than that as noise")
+    for r in rows:
+        if r["why"] and r is rows[-1]:
+            print(f"  unrated: {r['why']}")
+
+
+def cmd_note(args):
+    ch = find_challenge(args.id)
+    if set_note(ch["slug"], args.lang, args.version, " ".join(args.text)):
+        print(f"saved note on {args.version} of {ch['slug']} ({args.lang})")
+    else:
+        sys.exit(f"no version '{args.version}' recorded for {ch['slug']} ({args.lang}). See: uv run leetgpu/lgpu.py history {ch['id']}")
+
+
+def cmd_diff(args):
+    ch = find_challenge(args.id)
+    slug, lang = ch["slug"], args.lang
+    data = read_history(slug, lang)
+    if not data["versions"]:
+        sys.exit(f"no saved versions for {slug} ({lang}) yet")
+    last = data["versions"][-1]["n"]
+
+    def resolve(ref):
+        if ref == "current":
+            return solution_dir(ch) / LANGS[lang][0], "current"
+        n = parse_version(ref, data)
+        path = version_source(slug, lang, n) if n else None
+        if not path or not path.exists():
+            sys.exit(f"unknown version '{ref}' (have v1..v{last}, or 'current')")
+        return path, f"v{n}"
+
+    if args.a is None:  # no arguments: previous vs latest, or latest vs the file on disk when there is only one version
+        a, b = (f"v{last - 1}", f"v{last}") if last > 1 else (f"v{last}", "current")
+    else:
+        a, b = args.a, args.b or "current"
+    (pa, na), (pb, nb) = resolve(a), resolve(b)
+    diff = list(difflib.unified_diff(pa.read_text().splitlines(), pb.read_text().splitlines(), na, nb, lineterm=""))
+    print("\n".join(diff) if diff else f"{na} and {nb} are identical")
+
+
+def cmd_calibrate(args):
+    d = calibrate(force=True)
+    print(f"{d['gpu']}: {d['copy_gbps']} GB/s copy bandwidth, {d['fp32_gflops'] / 1000:.2f} TFLOPS fp32 matmul")
+    print(f"saved to {MACHINE_FILE}")
 
 
 def main():
@@ -959,6 +1360,27 @@ def main():
     p.add_argument("--iters", type=int, default=20)
     p.add_argument("--warmup", type=int, default=3)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--note", help="with --perf: what changed in this version (shown by `history`)")
+    p.add_argument("--no-record", action="store_true", help="with --perf: don't save this measurement to the history")
+
+    p = sub.add_parser("history", help="recorded benchmark runs of your versions of a solution")
+    p.add_argument("id")
+    p.add_argument("--lang", choices=LANGS, default="cuda")
+    p.add_argument("--md", action="store_true", help="print a markdown table in the results/TEMPLATE.md format")
+
+    p = sub.add_parser("note", help="set the 'what changed' note of a recorded version")
+    p.add_argument("id")
+    p.add_argument("version", help="v2, 2 or latest")
+    p.add_argument("text", nargs="+")
+    p.add_argument("--lang", choices=LANGS, default="cuda")
+
+    p = sub.add_parser("diff", help="diff two saved versions (default: previous vs latest)")
+    p.add_argument("id")
+    p.add_argument("a", nargs="?", help="a version (v2) or 'current'; alone, it is compared with the file in solutions/")
+    p.add_argument("b", nargs="?")
+    p.add_argument("--lang", choices=LANGS, default="cuda")
+
+    sub.add_parser("calibrate", help="measure this GPU's copy bandwidth and fp32 throughput (the rating ceilings)")
 
     p = sub.add_parser("_probe")
     p.add_argument("id")
@@ -973,9 +1395,18 @@ def main():
         return tui.main()
     if args.cmd == "_probe":
         return probe(find_challenge(args.id))
-    {"sync": cmd_sync, "scan": cmd_scan, "list": cmd_list, "show": cmd_show, "new": cmd_new, "run": cmd_run}[
-        args.cmd
-    ](args)
+    {
+        "sync": cmd_sync,
+        "scan": cmd_scan,
+        "list": cmd_list,
+        "show": cmd_show,
+        "new": cmd_new,
+        "run": cmd_run,
+        "history": cmd_history,
+        "note": cmd_note,
+        "diff": cmd_diff,
+        "calibrate": cmd_calibrate,
+    }[args.cmd](args)
 
 
 if __name__ == "__main__":
