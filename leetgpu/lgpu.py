@@ -289,7 +289,15 @@ def describe_case(case):
 # some kernels can never reach 100%, the byte model is the algorithmic minimum, and ceilings are measured, not specs.
 
 MIN_RATE_MS = 0.05  # faster than this and launch overhead dominates: the number says nothing about the kernel
-GRADES = [(0.80, "A", "excellent"), (0.60, "B", "good"), (0.40, "C", "fair"), (0.20, "D", "slow"), (0.0, "E", "very slow")]
+# What each grade means for you. The percentage behind it is an estimate that wobbles a few points between identical runs,
+# so it is stored but only shown on request (`history --details`); a grade absorbs that noise.
+GRADES = [
+    (0.80, "A", "at the limit, nothing worth chasing"),
+    (0.60, "B", "close, a little left to gain"),
+    (0.40, "C", "room to improve"),
+    (0.20, "D", "slow, worth a look at the access pattern"),
+    (0.0, "E", "far off, something big is wrong"),
+]
 
 
 def grade_of(eff):
@@ -559,8 +567,11 @@ def fmt_throughput(r):
     return f"{r['gbps']:.1f} GB/s"
 
 
-def fmt_roofline(r):
-    return f"{r['eff'] * 100:.0f}% {r['grade']}" if r["eff"] is not None else "n/a"
+def fmt_roofline(r, detail=False):
+    """The grade; with detail=True also the estimated percentage behind it."""
+    if r["eff"] is None:
+        return "n/a"
+    return f"{r['grade']} {r['eff'] * 100:.0f}%" if detail else r["grade"]
 
 
 def fmt_vs(x):
@@ -1240,7 +1251,7 @@ def run_perf(ch, c, sig, solve, args):
             print(f"  rating:    n/a, {r['why']}")
         else:
             g = grade_of(r["eff"])
-            print(f"  rating:    {g} ({grade_word(g)}), {r['eff'] * 100:.0f}% of the {r['bound']} roofline")
+            print(f"  rating:    {g}  {grade_word(g)} ({r['bound']}-bound)")
         print(f"  ({torch.cuda.get_device_name(0)}; leetgpu.com times on a T4, so expect different numbers)")
         results.append(
             {"desc": desc[:200], "median_ms": round(med, 5), "best_ms": round(best, 5), "ref_median_ms": round(ref_med, 5), **r}
@@ -1266,14 +1277,15 @@ def cmd_history(args):
     c = last["ceilings"]
     print(f"{ch['slug']} ({lang})   {last['gpu']}   measured ceilings: {c['copy_gbps']:.0f} GB/s copy, {c['fp32_gflops'] / 1000:.2f} TFLOPS fp32")
     print(f"input: {last['desc']}\n")
-    print(f"  {'version':<9}{'time (ms)':>10}  {'throughput':>13}  {'roofline':>9}  {'vs prev':>8}  {'vs torch':>8}  {'runs':>4}  what changed")
+    print(f"  {'version':<9}{'time (ms)':>10}  {'throughput':>13}  {'rating':>7}  {'vs prev':>8}  {'vs torch':>8}  {'runs':>4}  what changed")
     for r in rows:
         tag = f"v{r['n']}" + ("*" if r["hash"] == cur else "") + ("★" if r["best"] and len(rows) > 1 else "")
         print(
-            f"  {tag:<9}{r['ms']:>10.3f}  {fmt_throughput(r):>13}  {fmt_roofline(r):>9}  {fmt_vs(r['vs_prev']):>8}  "
+            f"  {tag:<9}{r['ms']:>10.3f}  {fmt_throughput(r):>13}  {fmt_roofline(r, args.details):>7}  {fmt_vs(r['vs_prev']):>8}  "
             f"{fmt_vs(r['vs_ref']):>8}  {r['runs']:>4}  {r['note']}"
         )
-    print("\n  * = the file in solutions/ right now    ★ = fastest    roofline = % of what this GPU can do for this work")
+    print("\n  * = the file in solutions/ right now    ★ = fastest    rating = how close to what this GPU can do for this work")
+    print("  A at the limit · B close · C room to improve · D slow · E far off")
     print("  vs prev / vs torch: how many times faster you are (1.50x = 50% faster, below 1 = slower)")
     if cur and all(r["hash"] != cur for r in rows):
         print(f"  your current solution file has no recorded run yet (it differs from every version): run {ch['id']} --perf to record it")
@@ -1367,6 +1379,7 @@ def main():
     p.add_argument("id")
     p.add_argument("--lang", choices=LANGS, default="cuda")
     p.add_argument("--md", action="store_true", help="print a markdown table in the results/TEMPLATE.md format")
+    p.add_argument("--details", action="store_true", help="also show the estimated percentage behind each grade")
 
     p = sub.add_parser("note", help="set the 'what changed' note of a recorded version")
     p.add_argument("id")

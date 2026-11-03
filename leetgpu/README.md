@@ -108,7 +108,7 @@ Every `--perf` run whose tests pass is saved, so you can change your kernel, mea
 
 ```bash
 lgpu run 1 --perf --note "shared-memory tiling"   # measure + record (--no-record to skip)
-lgpu history 1                    # versions: time, throughput, roofline rating, speedup vs previous, vs PyTorch
+lgpu history 1                    # versions: time, throughput, rating (A-E), speedup vs previous, vs PyTorch
 lgpu history 1 --md               # the same as a markdown table in the results/TEMPLATE.md columns
 lgpu note 1 v2 "float4 loads"     # set or change what a version did
 lgpu diff 1                       # previous vs latest version (lgpu diff 1 v1 v3, or `current` for the file on disk)
@@ -121,7 +121,8 @@ lgpu calibrate                    # re-measure this GPU's ceilings (done automat
 
 - *memory-bound* (copies, elementwise, reductions, transposes): the minimum bytes the kernel must move (each tensor once, in-out tensors twice) divided by the time, against the best copy bandwidth measured on your GPU.
 - *compute-bound* (matmul, convolution, attention): the reference's FLOPs as PyTorch counts them, against the best fp32 matmul measured on your GPU.
-- It takes whichever limit is slower (the roofline). Grades: A at 80% or more, B 60%, C 40%, D 20%, E below. Ceilings are measured with `lgpu calibrate`, never taken from spec sheets.
+- It takes whichever limit is slower (the roofline). Ceilings are measured with `lgpu calibrate`, never taken from spec sheets.
+- You see a grade, not a percentage: **A** at the limit, nothing worth chasing · **B** close, a little left to gain · **C** room to improve · **D** slow, worth a look at the access pattern · **E** far off, something big is wrong. (The cut-offs are 80%, 60%, 40% and 20% of the ceiling.) The percentage is stored in the history file but not shown, because it wobbles a few points between identical runs and can't be exactly 100%; `lgpu history 1 --details` adds it.
 
 Read it as an estimate. Some kernels can never reach 100%, and the byte model is the algorithmic minimum, so an algorithm that must read data several times scores low through no fault of yours. A result shows `n/a` instead of a grade when it can't be rated honestly: the kernel is faster than 0.05 ms (launch overhead dominates), the work is compute-bound but not fp32 (only an fp32 compute ceiling is modelled), or there is no tensor traffic. Before every timed call the L2 cache is overwritten with a scratch buffer, so a small input can't look faster than DRAM allows. This changed `--perf` timings compared with before.
 

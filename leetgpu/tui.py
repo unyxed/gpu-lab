@@ -568,7 +568,7 @@ class LgpuApp(App):
         best = self.perf.get(slug, {}).get(self.lang)
         if best:  # the fastest recorded version of the current language
             if best["grade"]:
-                t.append(f"best {best['grade']} {best['eff'] * 100:.0f}%", style=GRADE_STYLE[best["grade"]])
+                t.append(f"best {best['grade']}", style=GRADE_STYLE[best["grade"]])
             else:
                 t.append(f"best {best['ms']:.2f} ms", style="dim")
             t.append(f" v{best['n']}", style="dim")
@@ -584,7 +584,7 @@ class LgpuApp(App):
     def apply_table_layout(self, tw):
         """Pick the columns that fit: full -> drop diff/progress detail -> name only. Names are ellipsised to fit."""
         if tw >= 56:
-            tier, name_w = "full", tw - 39
+            tier, name_w = "full", tw - 38
         elif tw >= 34:
             tier, name_w = "mid", tw - 12
         else:
@@ -601,7 +601,7 @@ class LgpuApp(App):
             table.add_column("diff", width=6)
             table.add_column("challenge", width=key[1])
             table.add_column("progress", width=11)
-            table.add_column("perf", width=5)
+            table.add_column("perf", width=4)
             table.add_column("", width=1)
         elif tier == "mid":
             table.add_column("id", width=4)
@@ -657,7 +657,7 @@ class LgpuApp(App):
                 prog.append(f"{LANG_TAG[lang]}{m} ", style=s)
             best = self.perf.get(slug, {}).get(self.lang)
             if best and best["grade"]:
-                perf = Text(f"{best['grade']} {best['eff'] * 100:.0f}%", style=GRADE_STYLE[best["grade"]])
+                perf = Text(best["grade"], style=GRADE_STYLE[best["grade"]])
             else:
                 perf = Text("")
             return (str(ch["id"]), Text(ch["diff"], style=DIFF_STYLE[ch["diff"]]), clip(short_name(slug), name_w), prog, perf, flag)
@@ -826,7 +826,7 @@ class LgpuApp(App):
         table.add_column("ms", width=8)
         if key[0] == "full":
             table.add_column("throughput", width=12)
-        table.add_column("roofline", width=8)
+        table.add_column("rating", width=8)
         if key[0] in ("full", "mid"):
             table.add_column("vs prev", width=7)
         if key[0] == "full":
