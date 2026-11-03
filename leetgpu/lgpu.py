@@ -2,6 +2,7 @@
 """Offline LeetGPU runner: grade solutions locally with the challenges' own tests and references.
 
 Usage (from gpu-lab/, via `uv run`):
+    uv run leetgpu/lgpu.py                      no arguments: open the TUI (leetgpu/tui.py, needs textual)
     uv run leetgpu/lgpu.py sync                 clone/update the challenge set into leetgpu/problems/
     uv run leetgpu/lgpu.py scan                 measure each perf test's memory/time -> heavy flags
     uv run leetgpu/lgpu.py list [--heavy]       list challenges with flags and your progress
@@ -429,7 +430,14 @@ def cmd_sync(args):
         if subprocess.run(["git", "clone", src, str(PROBLEMS)]).returncode != 0:
             sys.exit("clone failed")
         subprocess.run(["git", "-C", str(PROBLEMS), "remote", "set-url", "origin", UPSTREAM_URL])
-    print(f"{len(all_challenges())} challenges. Next: uv run leetgpu/lgpu.py scan")
+    chs = all_challenges()
+    TEX_UNKNOWN.clear()
+    for ch in chs:  # safety net: new challenges may use LaTeX the text converter doesn't know yet
+        problem_text(ch)
+    if TEX_UNKNOWN:
+        print(f"note: unknown LaTeX commands in some statements: {', '.join(sorted(TEX_UNKNOWN))}")
+        print("      they show as bare words until added to TEX_SYMBOLS (or a sibling table) in lgpu.py")
+    print(f"{len(chs)} challenges. Next: uv run leetgpu/lgpu.py scan")
 
 
 def cmd_scan(args):
@@ -474,14 +482,286 @@ def cmd_list(args):
         print(f"{ch['id']:>4}  {ch['diff']:<6} {ch['slug'][:42]:<42} {prog:<22} {flag}")
 
 
+# ---------------------------------------------------------------- LaTeX -> plain text
+# Challenge statements are written in LaTeX (MathJax on the site). `tex_to_text` renders it as readable
+# Unicode for `show` and the TUI. A command it doesn't know degrades to its bare name (never a raw
+# backslash) and is recorded in TEX_UNKNOWN, which `sync` reports so it can be added to the tables here.
+
+NB = "\xa0"  # deliberate spacing; ordinary runs of spaces are collapsed at the end
+ROW, COL = "\x01", "\x00"  # row / column separators inside environments
+
+_GREEK_LOWER = (
+    "alpha beta gamma delta epsilon varepsilon zeta eta theta vartheta iota kappa lambda mu nu xi pi rho "
+    "sigma tau upsilon phi varphi chi psi omega"
+)
+TEX_SYMBOLS = {
+    **dict(zip(_GREEK_LOWER.split(), "αβγδεεζηθϑικλμνξπρστυφφχψω")),
+    **dict(zip("Gamma Delta Theta Lambda Xi Pi Sigma Upsilon Phi Psi Omega".split(), "ΓΔΘΛΞΠΣΥΦΨΩ")),
+    # operators and relations
+    "times": "×", "cdot": "·", "cdots": "⋯", "ldots": "…", "dots": "…", "pm": "±", "mp": "∓", "div": "÷",
+    "le": "≤", "leq": "≤", "ge": "≥", "geq": "≥", "neq": "≠", "ne": "≠", "approx": "≈", "sim": "∼",
+    "equiv": "≡", "propto": "∝", "ll": "≪", "gg": "≫",
+    "in": "∈", "notin": "∉", "subset": "⊂", "subseteq": "⊆", "cap": "∩", "cup": "∪", "setminus": "∖",
+    "odot": "⊙", "oplus": "⊕", "otimes": "⊗", "circ": "∘", "ast": "∗", "star": "⋆",
+    "mid": "|", "to": "→", "rightarrow": "→", "leftarrow": "←", "Rightarrow": "⇒", "Leftarrow": "⇐",
+    "leftrightarrow": "↔", "Leftrightarrow": "⇔", "mapsto": "↦", "uparrow": "↑", "downarrow": "↓",
+    "forall": "∀", "exists": "∃", "wedge": "∧", "vee": "∨", "neg": "¬", "emptyset": "∅",
+    "infty": "∞", "partial": "∂", "nabla": "∇", "ell": "ℓ", "top": "ᵀ", "bmod": " mod ",
+    "sum": "∑", "prod": "∏", "int": "∫", "bigcup": "⋃", "bigcap": "⋂",
+    # delimiters
+    "lfloor": "⌊", "rfloor": "⌋", "lceil": "⌈", "rceil": "⌉", "langle": "⟨", "rangle": "⟩",
+    "lVert": "‖", "rVert": "‖", "lvert": "|", "rvert": "|", "vert": "|", "Vert": "‖",
+}
+TEX_FUNCS = set("log ln exp sin cos tan tanh sinh cosh max min sup inf lim arg det".split())
+TEX_LIMITS = {"sum", "prod", "int", "bigcup", "bigcap", "max", "min", "lim", "sup", "inf"}  # take under/over limits
+TEX_SIZERS = set(
+    "left right big Big bigg Bigg bigl bigr Bigl Bigr biggl biggr Biggl Biggr".split()
+)  # size hints: the delimiter that follows is kept, the command dropped
+TEX_TEXTLIKE = set("text texttt textbf textit mathrm mathbf mathit mathsf mathcal mathtt mathscr operatorname boldsymbol bm".split())
+TEX_NOOP = {"displaystyle", "textstyle", "scriptstyle", "limits", "nolimits"}
+TEX_ACCENTS = {
+    "hat": "̂", "widehat": "̂", "tilde": "̃", "widetilde": "̃",
+    "bar": "̄", "overline": "̄", "vec": "⃗", "dot": "̇", "ddot": "̈",
+}
+TEX_SPACING = {",": " ", ";": " ", ":": " ", "!": "", " ": " ", "quad": NB * 2, "qquad": NB * 4}
+TEX_BLACKBOARD = {"R": "ℝ", "N": "ℕ", "Z": "ℤ", "Q": "ℚ", "C": "ℂ", "E": "𝔼", "P": "ℙ"}
+TEX_BRACKETS = {"matrix": ("", ""), "pmatrix": ("(", ")"), "bmatrix": ("[", "]"), "Bmatrix": ("{", "}"),
+                "vmatrix": ("|", "|"), "Vmatrix": ("‖", "‖")}
+TEX_UNKNOWN = set()
+
+_SUP_DIGITS = str.maketrans("0123456789+-=()", "⁰¹²³⁴⁵⁶⁷⁸⁹⁺⁻⁼⁽⁾")
+_SUB_DIGITS = str.maketrans("0123456789+-=()", "₀₁₂₃₄₅₆₇₈₉₊₋₌₍₎")
+_SUP_LETTERS = {"n": "ⁿ", "i": "ⁱ", "T": "ᵀ", "ᵀ": "ᵀ"}
+_SUB_LETTERS = dict(zip("aehijklmnoprstuvx", "ₐₑₕᵢⱼₖₗₘₙₒₚᵣₛₜᵤᵥₓ"))
+
+
+def _simple(s):
+    """True if s can follow / or √ or _ without parentheses."""
+    return len(s) <= 1 or re.fullmatch(r"[\w.]+", s) is not None or (s[0] == "√" and _simple(s[1:]))
+
+
+def _wrap(s):
+    return s if _simple(s) else f"({s})"
+
+
+def tex_script(kind, arg, explicit=False):
+    """Sub/superscript: real Unicode ones when the whole argument has them (x², xᵢ, 10⁻⁶), else x_(a,b) / x^(n+1).
+    explicit=True (limits of ∑, ∫, ...) always uses the _() / ^() form, which reads better than stacked glyphs."""
+    arg = arg.replace("−", "-").strip(" ")
+    if not arg:
+        return ""
+    if not explicit:
+        if all(ch in "0123456789+-=()" for ch in arg):
+            return arg.translate(_SUP_DIGITS if kind == "^" else _SUB_DIGITS)
+        letters = _SUP_LETTERS if kind == "^" else _SUB_LETTERS
+        if arg in letters:
+            return letters[arg]
+    return kind + (arg if _simple(arg) else f"({arg})")
+
+
+class _Tex:
+    """Small recursive-descent renderer for the LaTeX subset the challenges use."""
+
+    def __init__(self, src):
+        self.s = re.sub(r"\s+", " ", src.strip())
+        self.i = 0
+        self.limits = False  # the previous token was ∑/∫/max/...: its scripts are limits
+
+    def peek(self):
+        return self.s[self.i] if self.i < len(self.s) else ""
+
+    def seq(self, brace=False, env=False):
+        out, s = [], self.s
+        while self.i < len(s):
+            c = s[self.i]
+            if (brace and c == "}") or (env and s.startswith("\\end", self.i)):
+                break
+            if c not in "_^ ":
+                self.limits = False
+            if c == "\\":
+                out.append(self.command())
+            elif c == "{":
+                self.i += 1
+                out.append(self.seq(brace=True))
+                self.i += 1
+            elif c in "_^":
+                self.i += 1
+                limits = self.limits
+                out.append(tex_script(c, self.atom(), explicit=limits))
+                self.limits = limits
+            elif c == "&":
+                self.i += 1
+                out.append(COL)
+            elif c == "~":
+                self.i += 1
+                out.append(NB)
+            else:
+                self.i += 1
+                out.append(c)
+        return "".join(out)
+
+    def atom(self):
+        """One argument: a {group}, a single command, or a single character."""
+        while self.peek() == " ":
+            self.i += 1
+        c = self.peek()
+        if c in ("", "}"):
+            return ""
+        if c == "{":
+            self.i += 1
+            r = self.seq(brace=True)
+            self.i += 1
+            return r
+        if c == "\\":
+            return self.command()
+        self.i += 1
+        return c
+
+    def command(self):
+        s = self.s
+        self.i += 1
+        if self.i >= len(s):
+            return ""
+        if not s[self.i].isalpha():
+            ch = s[self.i]
+            self.i += 1
+            if ch == "\\":  # row break, optionally followed by a spacing like [4pt]
+                m = re.match(r"\[\s*-?[\d.]+\s*[a-z]{2}\s*\]", s[self.i :])
+                if m:
+                    self.i += m.end()
+                return ROW
+            return TEX_SPACING.get(ch, "‖" if ch == "|" else ch)  # \_ \{ \} \% ... -> the character itself
+        m = re.compile(r"[A-Za-z]+").match(s, self.i)
+        name = m.group()
+        self.i = m.end()
+
+        if name in TEX_SPACING:
+            return TEX_SPACING[name]
+        if name in TEX_SIZERS:
+            if name in ("left", "right") and self.peek() == ".":
+                self.i += 1  # invisible delimiter
+            return ""
+        if name in TEX_NOOP:
+            return ""
+        if name in ("frac", "tfrac", "dfrac"):
+            a, b = self.atom(), self.atom()
+            after = " " if re.match(r"[\\(\w]", self.s[self.i :]) else ""  # x/2 (1 + ..) rather than x/2(1 + ..)
+            return f"{_wrap(a)}/{_wrap(b)}{after}"
+        if name == "sqrt":
+            if self.peek() == "[":  # \sqrt[n]{x}: keep it simple, drop the index
+                self.i = max(self.i, s.find("]", self.i) + 1)
+            return "√" + _wrap(self.atom())
+        if name in TEX_ACCENTS:
+            a = self.atom()
+            return a + TEX_ACCENTS[name] if len(a) == 1 else f"{name}({a})"
+        if name == "mathbb":
+            return "".join(TEX_BLACKBOARD.get(ch, ch) for ch in self.atom())
+        if name in TEX_TEXTLIKE:
+            return self.atom()
+        if name == "begin":
+            return self.environment()
+        if name == "end":
+            self.atom()
+            return ""
+        if name in TEX_LIMITS:
+            self.limits = True
+        if name in TEX_SYMBOLS:
+            return TEX_SYMBOLS[name]
+        if name in TEX_FUNCS:  # log, max, ...: upright name, separated from a following letter/command
+            nxt = re.match(r"\\([A-Za-z]+)|[A-Za-z0-9]", s[self.i :])
+            gap = nxt and not (nxt.group(1) in TEX_SIZERS)
+            return name + (" " if gap else "")
+        TEX_UNKNOWN.add(name)
+        return name
+
+    def environment(self):
+        name = self.atom().strip()
+        if name == "array":
+            self.atom()  # column spec
+        body = self.seq(env=True)
+        if self.s.startswith("\\end", self.i):
+            self.i += 4
+            self.atom()
+        rows = [[c.strip(" ") for c in r.split(COL)] for r in body.split(ROW)]
+        while rows and not any(rows[-1]):
+            rows.pop()
+        if not rows:
+            return ""
+        base = name.rstrip("*")
+        w = [max(len(r[k]) for r in rows if k < len(r)) for k in range(max(map(len, rows)))]
+
+        def line(r, sep):
+            return sep.join(c.ljust(w[k], NB) for k, c in enumerate(r)).rstrip(NB)
+
+        if base in TEX_BRACKETS:
+            lb, rb = TEX_BRACKETS[base]
+            lines = [NB * 2 + lb + NB + line(r, NB * 2) + NB + rb for r in rows]
+        elif base == "cases":
+            lines = [NB * 2 + "{" + NB + line(r, NB * 2) for r in rows]
+        elif len(rows) == 1:
+            return " ".join(rows[0])
+        else:  # align, aligned, gather, ...: the first column lines up, the rest follows
+            lines = [line(r, " ") if len(r) > 1 else r[0] for r in rows]
+        return "\n" + "\n".join(lines) + "\n"
+
+
+def tex_to_text(src, display=False):
+    out = _Tex(src).seq().replace(ROW, "\n").replace(COL, " ")
+    lines = []
+    for ln in out.split("\n"):
+        ln = re.sub(r" {2,}", " ", ln).strip(" ").replace(NB, " ")
+        if ln.strip():
+            lines.append(ln)
+    if display:
+        return "\n" + "\n".join("    " + ln for ln in lines) + "\n\n"
+    return " ".join(lines)
+
+
+_MATH = re.compile(r"\\\((.+?)\\\)|\\\[(.+?)\\\] *|\$\$(.*?)\$\$ *", re.S)  # display math eats the space after it
+
+
+def convert_math(text):
+    """Replace every \\(..\\), \\[..\\] and $$..$$ span with its plain-text rendering."""
+
+    def sub(m):
+        if m.group(1) is not None:
+            return tex_to_text(m.group(1))
+        return tex_to_text(m.group(2) if m.group(2) is not None else m.group(3), display=True)
+
+    return _MATH.sub(sub, text)
+
+
+# ---------------------------------------------------------------- HTML -> plain text
+
+
 class _HtmlToText(HTMLParser):
     BLOCK = {"p", "h1", "h2", "h3", "pre", "ul", "ol", "div", "br", "table", "tr"}
 
     def __init__(self):
         super().__init__()
         self.parts = []
+        self.pre = 0  # >0 inside <pre>, where whitespace is kept as written
+        self.script = None  # (tag, index into parts) while inside <sub>/<sup>
+        self.table = None  # rows of cell texts while inside <table>
+        self.cell = None  # index into parts where the current <td>/<th> started
+        self.heads = 0  # leading rows that are header rows
 
     def handle_starttag(self, tag, attrs):
+        if tag == "pre":
+            self.pre += 1
+        if tag in ("sub", "sup"):
+            self.script = (tag, len(self.parts))
+            return
+        if self.table is not None:
+            if tag == "tr":
+                self.table.append([])
+            elif tag in ("td", "th"):
+                self.cell = len(self.parts)
+                if tag == "th" and not self.table[-1]:
+                    self.heads += 1
+            return
+        if tag == "table":
+            self.table, self.heads = [], 0
         if tag in self.BLOCK:
             self.parts.append("\n")
         if tag == "li":
@@ -490,23 +770,67 @@ class _HtmlToText(HTMLParser):
             self.parts.append("## ")
 
     def handle_endtag(self, tag):
+        if tag == "pre":
+            self.pre = max(0, self.pre - 1)
+        if tag in ("sub", "sup") and self.script:
+            _, idx = self.script
+            arg = "".join(self.parts[idx:])
+            del self.parts[idx:]
+            self.parts.append(tex_script("^" if tag == "sup" else "_", arg))
+            self.script = None
+            return
+        if self.table is not None:
+            if tag in ("td", "th") and self.cell is not None:
+                self.table[-1].append("".join(self.parts[self.cell :]))
+                del self.parts[self.cell :]
+                self.cell = None
+            elif tag == "table":
+                self.parts.append(self.render_table())
+                self.table = None
+            return
         if tag in self.BLOCK:
             self.parts.append("\n")
 
+    def render_table(self):
+        rows = [[convert_math(re.sub(r"\s+", " ", c)).strip() for c in r] for r in self.table if r]
+        if not rows:
+            return ""
+        w = [max(len(r[k]) for r in rows if k < len(r)) for k in range(max(map(len, rows)))]
+        lines = ["  ".join(c.ljust(w[k]) for k, c in enumerate(r)).rstrip() for r in rows]
+        if self.heads:
+            lines.insert(self.heads, "  ".join("─" * n for n in w))
+        return "\n" + "\n".join(lines) + "\n"
+
     def handle_data(self, data):
+        if not self.pre:  # reflow paragraphs: the HTML source's line breaks and indentation mean nothing
+            data = re.sub(r"\s+", " ", data)
+            if not self.parts or self.parts[-1][-1:].isspace():
+                data = data.lstrip()
         self.parts.append(data)
+
+
+def _stray_tex(m):
+    name = m.group(1)
+    return TEX_SPACING.get(name) or TEX_SYMBOLS.get(name) or m.group(0)
+
+
+def problem_text(ch):
+    """Problem statement as plain text (shared by `show` and the TUI)."""
+    p = _HtmlToText()
+    page = (ch["dir"] / "challenge.html").read_text()
+    p.feed(re.sub(r"<svg.*?</svg>", "[diagram: open challenge.html]", page, flags=re.S))
+    p.close()
+    text = convert_math("".join(p.parts))
+    text = re.sub(r"\\([A-Za-z]+)", _stray_tex, text).replace(NB, " ")  # commands left outside math delimiters
+    text = "\n".join(line.rstrip() for line in text.splitlines())
+    text = re.sub(r"\n\s*\n(\s*- )", r"\n\1", text)
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def cmd_show(args):
     ch = find_challenge(args.id)
-    p = _HtmlToText()
-    page = (ch["dir"] / "challenge.html").read_text()
-    p.feed(re.sub(r"<svg.*?</svg>", "[diagram: open challenge.html]", page, flags=re.S))
-    text = "\n".join(line.rstrip() for line in "".join(p.parts).splitlines())
-    text = re.sub(r"\n\s*\n(\s*- )", r"\n\1", text)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
     print(f"# {ch['id']}. {ch['slug']} ({ch['diff']})\n")
-    print(text)
+    print(problem_text(ch))
     print(f"\nfiles:    {ch['dir']}")
     print(f"solution: {solution_dir(ch)}")
     reasons = flag_for(ch)
@@ -602,7 +926,7 @@ def run_perf(ch, c, sig, solve, args):
 
 def main():
     ap = argparse.ArgumentParser(description="Offline LeetGPU runner")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd")  # no command -> TUI
 
     sub.add_parser("sync", help="clone or update the challenge set")
 
@@ -640,6 +964,13 @@ def main():
     p.add_argument("id")
 
     args = ap.parse_args()
+    if args.cmd is None:
+        try:
+            import tui  # lazy: the CLI itself stays dependency-free
+        except ImportError as e:
+            ap.print_help()
+            sys.exit(f"\nTUI unavailable ({e}). Run `uv sync`, or use a subcommand.")
+        return tui.main()
     if args.cmd == "_probe":
         return probe(find_challenge(args.id))
     {"sync": cmd_sync, "scan": cmd_scan, "list": cmd_list, "show": cmd_show, "new": cmd_new, "run": cmd_run}[

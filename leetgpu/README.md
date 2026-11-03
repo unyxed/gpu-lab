@@ -22,6 +22,29 @@ uv run leetgpu/lgpu.py scan      # measure every perf test once, flag the heavy 
 
 After that, everything works offline. Run `sync` (and then `scan` again) whenever you're online and want new challenges.
 
+## TUI
+
+`lgpu` with no arguments opens a terminal UI (`tui.py`, built on [Textual](https://textual.textualize.io)). It is a front end over the same data as the CLI. `run` and `new` execute as subprocesses of `lgpu.py` with their output streamed live, so the UI never freezes during nvcc or GPU work. The CLI stays dependency-free, and only `tui.py` needs `textual`.
+
+| key | action |
+| --- | ------ |
+| `↑` `↓` | pick a challenge; the problem statement shows on the right |
+| `space` / `b` | scroll the problem down / up |
+| `enter` | run example + functional tests (if there's no solution yet, it tells you to press `n`) |
+| `e` / `p` | example only / full run plus `--perf` |
+| `n` | copy the starter into `solutions/` (`new`) |
+| `l` / `t` | cycle language (cuda, triton, pytorch) / toggle `--t4` |
+| `/` | show the filter bar and search by id or name. `enter` or `↓` returns to the list and keeps the filter; `esc` clears it and hides the bar |
+| `d` / `h` / `o` | cycle difficulty / heavy only / todo only |
+| `c` | change the theme; the choice is saved in `.cache/tui.json` and restored on the next launch |
+| `x` | cancel the running job (only shown while one runs) |
+| `?` | key help |
+| `q` | quit |
+
+The layout stacks vertically when the terminal is narrower than 120 columns. While a job runs, the output pane shows a live timer, and the run keys are greyed out.
+
+Progress column: `cu✔` passed, `cu✘` failed, `cu·` not run yet. `⚠` marks a heavy perf test, `?` a challenge that hasn't been scanned. `sync` and `scan` stay CLI-only.
+
 ## Daily loop
 
 ```bash
@@ -38,6 +61,15 @@ lgpu run 1 --file solutions/easy/1_vector_add/v2.cu --perf   # benchmark another
 ```
 
 Languages: `--lang cuda` (default), `triton`, `pytorch`.
+
+## Problem statements
+
+`show` and the TUI turn each `challenge.html` into plain text. The statements are written in LaTeX (the site renders them with MathJax), so `lgpu.py` has a small built-in LaTeX-to-Unicode renderer:
+
+- Symbols and Greek letters become Unicode (`\times` → ×, `\alpha` → α, `\le` → ≤). Fractions, roots and sub/superscripts get plain-text forms: `x/2`, `√(d)`, `x²`, `xᵢ`, `W_qkv`, `∑_(j=0)^(N-1)`.
+- `cases`, `matrix` and `align` blocks become aligned text blocks. `<sub>`, `<sup>` and HTML tables are handled too, and paragraphs are reflowed.
+- A command the renderer doesn't know prints as its bare name, never as a raw backslash. `lgpu sync` lists any unknown commands in the challenge set after pulling, so you know when to add one to the `TEX_*` tables in `lgpu.py`.
+- If a statement is ever hard to read as text, open `challenge.html` in a browser (`show` prints the path).
 
 ## How grading works
 
