@@ -7,7 +7,7 @@ leetgpu/
   lgpu.py       the runner (one file, Python + PyTorch)
   tui.py        the terminal UI (needs textual); `lgpu` with no arguments opens it
   solutions/    solutions, committed: solutions/<difficulty>/<id>_<name>/solution.{cu,triton.py,pytorch.py}
-  history/      benchmark record, committed: every version measured, its runs and ratings (see below)
+  history/      local benchmark record, gitignored: every version measured, its runs and ratings (see below)
   problems/     gitignored clone of AlphaGPU/leetgpu-challenges (CC BY-NC-ND, never pushed)
   .cache/       gitignored: compiled .so files, scan results, pass/fail status, measured GPU ceilings, TUI theme
 ```
@@ -115,7 +115,7 @@ lgpu diff 1                       # previous vs latest version (lgpu diff 1 v1 v
 lgpu calibrate                    # re-measure this GPU's ceilings (done automatically the first time)
 ```
 
-**Versions.** A version is a hash of the solution file. Benchmarking new code gives `v2`; benchmarking the same code again adds another run to the same version, which shows how noisy the measurement is (`history` warns when runs of the same code differ by 3% or more, so don't trust speedups smaller than that). A copy of each version's source is kept in `history/<challenge>/<lang>/` so you can diff or restore an old one. Records are in `history/<challenge>/<lang>.json`, committed with the solutions. `--t4` builds are not recorded.
+**Versions.** A version is a hash of the solution file. Benchmarking new code gives `v2`; benchmarking the same code again adds another run to the same version, which shows how noisy the measurement is (`history` warns when runs of the same code differ by 3% or more, so don't trust speedups smaller than that). A copy of each version's source is kept in `history/<challenge>/<lang>/` so you can diff or restore an old one. Records are in `history/<challenge>/<lang>.json`. `--t4` builds are not recorded.
 
 **Rating.** The rating says how close a run got to what this GPU can actually do for the work the challenge requires:
 
