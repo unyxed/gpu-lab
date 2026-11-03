@@ -97,3 +97,8 @@ __pycache__/
 .venv/
 leetgpu/problems/
 leetgpu/.cache/
+
+# ==============================================================================
+# Third-party course repos kept for reading only (own clones, never pushed)
+# ==============================================================================
+reference/
