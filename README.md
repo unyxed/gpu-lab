@@ -1,21 +1,25 @@
 # gpu-lab
 
-This is my learning repo for CUDA and GPU programming/performance engineering. I'm a junior game developer, and I want to become a strong HPC/GPU performance engineer, so I'm working through the stack from the bottom up.
+A learning repository for CUDA and GPU performance engineering. It works through the stack from the bottom up: execution model, memory hierarchy, optimized kernels, then Triton/PyTorch integration and profiling. Every exercise is checked against a CPU or PyTorch reference, and optimizations are recorded as measured benchmark tables.
 
-## I Write All The Following By Hand So I Could Actually Learn
+## Authorship
 
-- I write all the kernels
-- C++ exercise code
-- helpers in `common/`
-- LeetGPU solutions
+All kernels, C++ exercise code, helpers in `common/` and LeetGPU solutions are written by hand.
 
-I do use an AI assistant (Claude Code), but only in a narrow role:
+An AI assistant (Claude Code) is used in a deliberately narrow role:
 
-- It writes the build and tooling files: `CMakeLists.txt`, `.gitignore`, `pyproject.toml`, the offline LeetGPU runner `leetgpu/lgpu.py`.
-- It sometimes writes my commit messages.
-- When I ask, it explains a concept, gives me a hint, or reviews code I already wrote. (as a mentor)
+- It writes build and tooling files: `CMakeLists.txt`, `.gitignore`, `pyproject.toml` and the offline LeetGPU runner `leetgpu/lgpu.py`.
+- It sometimes drafts commit messages.
+- On request, it explains concepts, gives hints and reviews code that is already written.
 
-It doesn't write or edit my kernels, exercises or solutions, and I don't ask it for complete solutions. I've set this up as a rule in the assistant's project instructions (a local `CLAUDE.md`), so it isn't just a good intention. The git history shows it: the commits that add exercise code are mine.
+It does not write or edit kernels, exercises or solutions. This rule is enforced through the assistant's project instructions, and the git history reflects it: commits that add exercise code are authored by me.
+
+## Requirements
+
+- An NVIDIA GPU with a current driver, and the CUDA toolkit (`nvcc`). Blackwell (`sm_120`) needs 12.8 or newer.
+- CMake 3.24+ and Ninja
+- A C++20 host compiler
+- [`uv`](https://docs.astral.sh/uv/) for the Python tooling. PyTorch is used only as a test bench and reference, never in the CUDA code.
 
 ## Build and run
 
@@ -26,47 +30,48 @@ cmake --build build --target vector_add       # or a single exercise
 ./build/bin/vector_add
 ```
 
-- Every `stageN-*/<exercise>/` folder with `.cu` files becomes an executable named after the folder. To add an exercise I create a folder and re-run configure.
+- Every `stageN-*/<exercise>/` folder with `.cu` files becomes an executable named after the folder. Adding an exercise means creating a folder and re-running configure.
 - The default build is Release with `-lineinfo`, so Nsight can map metrics back to source lines. `-G` is only added in Debug.
-- `compile_commands.json` is exported so clangd works in my editor.
+- Code is built as C++20 for the GPU installed in the machine (`CMAKE_CUDA_ARCHITECTURES=native`).
+- `compile_commands.json` is exported for clang-based tooling such as clangd.
 
 ## Layout
 
 ```
 gpu-lab/
   CMakeLists.txt         one target per exercise folder, found automatically
-  common/                small helpers I write myself (CUDA_CHECK, DeviceBuffer, GpuTimer)
+  common/                small helpers (CUDA_CHECK, DeviceBuffer, GpuTimer)
   stage1-cuda-core/      execution model, first kernels
   stage2-memory/         shared memory, reductions, scan
   stage3-kernels/        matrix-multiply ladder, ML-flavored kernels
   stage4-transformers/   Python / PyTorch / Triton work
   results/               benchmark tables, one .md per topic
-  notes/                 my explain-it write-ups
-  leetgpu/               offline LeetGPU runner and my solutions
+  notes/                 short write-ups
+  leetgpu/               offline LeetGPU runner and solutions
 ```
 
 Folders are named by stage and topic, never by date.
 
 ## Plan
 
-| Stage           | What I'm learning                                                                                                                                                              | Status      |
+| Stage           | Topics                                                                                                                                                                         | Status      |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------- |
 | 1. CUDA core    | host/device, thread/block/grid indexing, `cudaMalloc`/`cudaMemcpy`, bounds checks, event timing, effective bandwidth, RAII wrappers (`DeviceBuffer`, `GpuTimer`, `CUDA_CHECK`) | in progress |
 | 2. Memory       | shared memory, `__syncthreads`, warps and divergence, parallel reduction (naive, shared memory, warp shuffle), scan                                                            | planned     |
 | 3. Kernels      | matmul ladder (naive, coalesced, tiled, register-tiled) benchmarked against cuBLAS; softmax and LayerNorm/RMSNorm, including a fused softmax                                   | planned     |
-| 4. Transformers | Triton versions of the same kernels, calling my own kernel from PyTorch, profiling with Nsight, roofline analysis                                                              | planned     |
+| 4. Transformers | Triton versions of the same kernels, calling a custom kernel from PyTorch, profiling with Nsight, roofline analysis                                                            | planned     |
 
-If I continue after that: a FlashAttention-style attention kernel, int8/FP8 quantization, and a small LLM inference engine (which lives in its own repo, not here).
+Possible follow-ups: a FlashAttention-style attention kernel, int8/FP8 quantization, and a small LLM inference engine (kept in a separate repo).
 
 ## LeetGPU practice
 
-`leetgpu/` is an offline runner for [LeetGPU](https://leetgpu.com) challenges, so I can solve them locally in my editor. It compiles my `solution.cu` with `nvcc`, loads it with `ctypes`, and grades it with each challenge's own reference implementation, tests and tolerances. It also has a `--perf` mode, and a `--t4` flag that catches code that would not compile on the site's older T4 GPU.
+`leetgpu/` is an offline runner for [LeetGPU](https://leetgpu.com) challenges. It compiles a `solution.cu` with `nvcc`, loads it with `ctypes`, and grades it with each challenge's own reference implementation, tests and tolerances. It also has a `--perf` mode, and a `--t4` flag that catches code that would not compile on the site's older T4 GPU.
 
-The challenge set is third-party content under CC BY-NC-ND, so it is gitignored and never pushed. Only my solutions are committed. Details are in [`leetgpu/README.md`](leetgpu/README.md).
+The challenge set is third-party content under CC BY-NC-ND, so it is gitignored and not distributed here. Only the solutions are committed. Details are in [`leetgpu/README.md`](leetgpu/README.md).
 
 ## Results
 
-I'll add benchmark tables to [`results/`](results/) as I optimize each exercise, using [`results/TEMPLATE.md`](results/TEMPLATE.md). Each table states the input size and how many runs I averaged.
+Benchmark tables are added to [`results/`](results/) as each exercise is optimized, using [`results/TEMPLATE.md`](results/TEMPLATE.md). Each table states the input size and the number of runs averaged.
 
 ## References
 
