@@ -1,3 +1,4 @@
+#include "gpu_timer.h"
 #include <iostream>
 #include <vector>
 #include <cuda_runtime.h>
@@ -43,10 +44,14 @@ int main() {
         C_h.push_back(0.0f);
     }
 
+    GpuTimer gpu_timer { GpuTimer() };
+    gpu_timer.start();
     vec_add(A_h.data(), B_h.data(), C_h.data(), N);
+    gpu_timer.stop();
 
     cudaDeviceSynchronize();
 
+    std::cout << "GpuTimer Time: " << gpu_timer.time() << std::endl;
     std::cout << "Result at index 0: " << C_h[0] << " (Expected: 3)" << std::endl;
 
     return 0;
